@@ -56,7 +56,7 @@ MAX_RUN_COMMIT = 12.0
 GATE_MAX_RUN = 25.0
 # When a commit lists anything, its cheap neighbors (tests sharing state with
 # the edited code, see analyze.neighbors) up to this many seconds each go too.
-NEIGHBOR_MAX_SECONDS = 0.5
+NEIGHBOR_MAX_SECONDS = 0
 # Chance that something among a change's cheap candidates fails.
 P_FAIL_CODE = 0.45
 P_FAIL_DATA = 0.95
