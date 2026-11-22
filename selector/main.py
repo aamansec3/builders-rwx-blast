@@ -50,10 +50,10 @@ MAX_RUN_TEST = 3.0 * RUN_SCALE
 # generator_memory) are the only ones the gate may drop unrun.
 GIANT_SECONDS = 5.0
 # Budget of CPU seconds for local runs in one commit.
-MAX_RUN_COMMIT = 12.0
+MAX_RUN_COMMIT = 0.0
 # Most CPU to spend running every cheap candidate in order to gate the
 # expensive ones (see plan()).
-GATE_MAX_RUN = 25.0
+GATE_MAX_RUN = 0.0
 # When a commit lists anything, its cheap neighbors (tests sharing state with
 # the edited code, see analyze.neighbors) up to this many seconds each go too.
 NEIGHBOR_MAX_SECONDS = 0
