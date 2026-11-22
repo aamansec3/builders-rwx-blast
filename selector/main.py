@@ -35,15 +35,15 @@ MAX_WORKERS = 8
 
 # Overhead of a pytest child, in CPU seconds, before any test runs: pytest
 # start, importing sqlglot and the test modules, class fixtures.
-BASE_COST = 1.2
+BASE_COST = 0.7
 FILE_COST = {
-    "tests/test_executor.py": 6.0,  # setUpClass loads the TPC-H and TPC-DS tables
-    "tests/test_optimizer.py": 1.5,
+    "tests/test_executor.py": 4.0,  # setUpClass loads the TPC-H and TPC-DS tables
+    "tests/test_optimizer.py": 1.0,
 }
-DEFAULT_FILE_COST = 0.25
-# Real CPU in the container over maps/runcost.json, calibrated against
-# `make sample` (2haz's candidates: 11 s estimated, ~20-28 s measured).
-RUN_SCALE = 1.9
+DEFAULT_FILE_COST = 0.15
+# Real CPU in the container over maps/runcost.json. 1.9 matched `make sample`
+# on a busy machine; 1.0 trusts the estimates as measured.
+RUN_SCALE = 1.0
 # A candidate whose own cost is above this always goes out unverified.
 MAX_RUN_TEST = 3.0 * RUN_SCALE
 # Tests recorded at this many seconds or more (tpcds, max_nodes,
