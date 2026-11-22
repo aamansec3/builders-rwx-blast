@@ -24,7 +24,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from analyze import Index, candidates, parse_patch  # noqa: E402
+from analyze import Index, candidates, neighbors, parse_patch  # noqa: E402
 
 DATA = os.environ.get("BLAST_DATA", "/data")
 SRC = os.environ.get("BLAST_SRC", "/opt/sqlglot")
@@ -35,21 +35,28 @@ MAX_WORKERS = 8
 
 # Overhead of a pytest child, in CPU seconds, before any test runs: pytest
 # start, importing sqlglot and the test modules, class fixtures.
-BASE_COST = 0.7
+BASE_COST = 1.2
 FILE_COST = {
-    "tests/test_executor.py": 4.0,  # setUpClass loads the TPC-H and TPC-DS tables
-    "tests/test_optimizer.py": 1.0,
+    "tests/test_executor.py": 6.0,  # setUpClass loads the TPC-H and TPC-DS tables
+    "tests/test_optimizer.py": 1.5,
 }
-DEFAULT_FILE_COST = 0.15
-# Measured local CPU is this many times the recorded seconds, roughly.
-RUN_SCALE = 1.0
+DEFAULT_FILE_COST = 0.25
+# Real CPU in the container over maps/runcost.json, calibrated against
+# `make sample` (2haz's candidates: 11 s estimated, ~20-28 s measured).
+RUN_SCALE = 1.9
 # A candidate whose own cost is above this always goes out unverified.
-MAX_RUN_TEST = 3.0
+MAX_RUN_TEST = 3.0 * RUN_SCALE
+# Tests recorded at this many seconds or more (tpcds, max_nodes,
+# generator_memory) are the only ones the gate may drop unrun.
+GIANT_SECONDS = 5.0
 # Budget of CPU seconds for local runs in one commit.
 MAX_RUN_COMMIT = 12.0
 # Most CPU to spend running every cheap candidate in order to gate the
 # expensive ones (see plan()).
 GATE_MAX_RUN = 25.0
+# When a commit lists anything, its cheap neighbors (tests sharing state with
+# the edited code, see analyze.neighbors) up to this many seconds each go too.
+NEIGHBOR_MAX_SECONDS = 0.5
 # Chance that something among a change's cheap candidates fails.
 P_FAIL_CODE = 0.45
 P_FAIL_DATA = 0.95
@@ -85,20 +92,25 @@ def pack(nums: list[int], ms: dict[int, int]) -> tuple[int, list[list[int]]]:
     return best
 
 
-def plan(cands: set[int], tests: list[dict], ms: dict[int, int], runcost: dict[int, float], p_fail: float):
+def plan(cands: set[int], tests: list[dict], ms: dict[int, int], runcost: dict[int, float], p_fail: float,
+         nb: set[int] = frozenset()):
     """Decide what to run here: (estimated cost, run here, list as is, list only on a failure).
 
     Running a set R here costs its CPU. If nothing in R fails the answer
     drops R; if something does (probability p_fail), assume the worst, that
     the answer keeps everything.
 
-    The gate: when every cheap candidate runs here and passes, the expensive
-    ones (tpcds, max_nodes, generator_memory) are dropped as well. They are
+    The gate: when every cheap candidate runs here and passes, the giant ones
+    (tpcds, max_nodes, generator_memory) are dropped as well. They are
     broad workloads over code the cheap fixture tests also exercise, and in
     every labeled commit where one failed, several cheap candidates failed
     too. With --maxfail=1 a failing run stops early, at about half its cost.
     """
-    full_cost = pack(sorted(cands), ms)[0] / 1000
+    # whenever anything is listed, the neighbors nb go along (see main())
+    def listed(rest):
+        return pack(sorted(set(rest) | nb), ms)[0] / 1000 if rest else 0.0
+
+    full_cost = listed(cands)
     cheap = sorted((n for n in cands if runcost[n] <= MAX_RUN_TEST), key=lambda n: runcost[n])
     best = (full_cost, [], sorted(cands), [])
     run: list[int] = []
@@ -120,14 +132,16 @@ def plan(cands: set[int], tests: list[dict], ms: dict[int, int], runcost: dict[i
             if len(run) >= checkpoint or near_cap:
                 checkpoint *= 2
                 rest = sorted(cands - set(run))
-                est = spent + (1 - p_fail) * pack(rest, ms)[0] / 1000 + p_fail * full_cost
+                est = spent + (1 - p_fail) * listed(rest) + p_fail * full_cost
                 if est < best[0]:
                     best = (est, list(run), rest, [])
         if last:
-            gated = sorted(cands - set(run))
-            est = (1 - p_fail) * spent + p_fail * (spent / 2 + full_cost)
-            if est < best[0]:
-                best = (est, list(run), [], gated)
+            unrun = cands - set(run)
+            gated = sorted(n for n in unrun if tests[n]["seconds"] >= GIANT_SECONDS)
+            rest = sorted(n for n in unrun if tests[n]["seconds"] < GIANT_SECONDS)
+            est = (1 - p_fail) * (spent + listed(rest)) + p_fail * (spent / 2 + full_cost)
+            if gated and est < best[0]:
+                best = (est, list(run), rest, gated)
     return best
 
 
@@ -234,6 +248,7 @@ def main():
     patches = sorted(f for f in os.listdir(os.path.join(DATA, "commits")) if f.endswith(".patch"))
     jobs = []
     answers: dict[str, list[int]] = {}
+    extra: dict[str, set[int]] = {}
     for fn in patches:
         cid = fn[:-6]
         sources: dict[str, str | None] = {}
@@ -246,12 +261,13 @@ def main():
             log(f"{cid}: analysis failed ({e!r}); listing every test")
             answers[cid] = [t["number"] for t in tests]
             continue
+        extra[cid] = {n for n in neighbors(index, change) - cands if tests[n]["seconds"] <= NEIGHBOR_MAX_SECONDS}
         if any(not rel.startswith(("sqlglot/", "tests/")) for rel in sources):
             # tests may reach files outside sqlglot/ and tests/ through
             # resolved paths, which would bypass the patched copy
             est, run, rest, gated = pack(sorted(cands), ms)[0] / 1000, [], sorted(cands), []
         else:
-            est, run, rest, gated = plan(cands, tests, ms, runcost, fail_prior(change))
+            est, run, rest, gated = plan(cands, tests, ms, runcost, fail_prior(change), extra[cid])
         log(f"{cid}: {len(cands)} candidates, run {len(run)} here, list {len(rest)}, "
             f"gate {len(gated)}, est {est:.1f}s {change.notes}")
         answers[cid] = rest
@@ -264,9 +280,18 @@ def main():
 
     for fn in patches:
         cid = fn[:-6]
-        cost, workers = pack(sorted(set(answers[cid])), ms)
+        chosen = set(answers[cid])
+        if chosen:
+            chosen |= extra.get(cid, set())
+        cost, workers = pack(sorted(chosen), ms)
         print(json.dumps({"commit": cid, "workers": workers}), flush=True)
-    log(f"done in {time.time() - t0:.2f}s")
+    import resource
+
+    cpu = sum(
+        u.ru_utime + u.ru_stime
+        for u in (resource.getrusage(resource.RUSAGE_SELF), resource.getrusage(resource.RUSAGE_CHILDREN))
+    )
+    log(f"done in {time.time() - t0:.2f}s wall, {cpu:.2f}s cpu (self and children)")
 
 
 def run_jobs(jobs, tests, by_id, answers, runcost):

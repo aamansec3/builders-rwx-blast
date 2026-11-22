@@ -248,6 +248,7 @@ def bound_names(stmt) -> set[str]:
 class Change:
     funcs: list = field(default_factory=list)      # (relfile, lo, hi) spans in the old file
     lines: list = field(default_factory=list)      # (relfile, lo, hi, func_lo, func_hi): a statement
+    owners: list = field(default_factory=list)     # (classkey or None, relfile) owning edited code
     classes: list = field(default_factory=list)    # (classkey, relfile, lo, hi, names)
     modules: list = field(default_factory=list)    # (modname, relfile, names, opaque)
     files: list = field(default_factory=list)      # data files touched
@@ -376,6 +377,12 @@ def analyze_python(rel: str, old_src: str | None, new_src: str | None, change: C
                 k -= 1
                 of, nf = oc[o_idx[k]], nc[n_idx[k]]
             if not same_node(of, nf, old_lines, new_lines):
+                classes = [n for n in oc[:oc.index(of)] if isinstance(n, ast.ClassDef)]
+                if classes:
+                    qual = ".".join(c.name for c in classes)
+                    change.owners.append((f"{mod}:{qual}", rel))
+                else:
+                    change.owners.append((None, rel))
                 # Inside the body, only tests reaching the edited statement
                 # can notice: execution is identical up to that point.
                 stmts = [n for n in oc[oc.index(of) + 1:] if isinstance(n, ast.stmt)]
@@ -567,6 +574,21 @@ def candidates(diffs: list[FileDiff], src_root: str, index: Index, sources: dict
     for rel, old_t, new_t in change.tests_files:
         out |= test_file_tests(index, rel, old_t, new_t)
     return out, change
+
+
+def neighbors(index: Index, change: Change) -> set[int]:
+    """Tests sharing state with edited code: users of its class, or of its module.
+
+    A test that breaks can leave shared state (dialect settings, caches)
+    broken for tests that run after it in the same process, so when a change
+    breaks something these may fail too, depending on test order.
+    """
+    out: set[int] = set()
+    for key, rel in change.owners:
+        out |= class_users(index, key) if key else index.tests_using_module(modname(rel), rel)
+    for key, rel, *_ in change.classes:
+        out |= class_users(index, key)
+    return out
 
 
 def class_users(index: Index, key: str) -> set[int]:
